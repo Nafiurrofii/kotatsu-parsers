@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
 @MangaSourceParser("KIRYUU", "Kiryuu", "id")
 internal class KiryuuParser(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.KIRYUU, "v4.kiryuu.to", pageSize = 50, searchPageSize = 10) {
+	MangaReaderParser(context, MangaParserSource.KIRYUU, "kiryuu.online", pageSize = 50, searchPageSize = 10) {
 
 	override val listUrl = "/manga/"
 
