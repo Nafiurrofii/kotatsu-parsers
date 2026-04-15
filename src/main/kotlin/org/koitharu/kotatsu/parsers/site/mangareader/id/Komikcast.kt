@@ -3,7 +3,7 @@ package org.koitharu.kotatsu.parsers.site.mangareader.id
 import kotlinx.coroutines.delay
 import okhttp3.Interceptor
 import okhttp3.Response
-import org.jsoup.nodes.Document
+import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -16,343 +16,242 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaPage
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.MangaState
+import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
 import org.koitharu.kotatsu.parsers.model.SortOrder
-import org.koitharu.kotatsu.parsers.model.WordSet
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
-import org.koitharu.kotatsu.parsers.util.attrAsAbsoluteUrl
-import org.koitharu.kotatsu.parsers.util.attrAsRelativeUrl
 import org.koitharu.kotatsu.parsers.util.generateUid
-import org.koitharu.kotatsu.parsers.util.mapChapters
-import org.koitharu.kotatsu.parsers.util.mapNotNullToSet
-import org.koitharu.kotatsu.parsers.util.oneOrThrowIfMany
-import org.koitharu.kotatsu.parsers.util.ownTextOrNull
-import org.koitharu.kotatsu.parsers.util.parseHtml
-import org.koitharu.kotatsu.parsers.util.parseSafe
-import org.koitharu.kotatsu.parsers.util.selectFirstOrThrow
-import org.koitharu.kotatsu.parsers.util.src
-import org.koitharu.kotatsu.parsers.util.textOrNull
-import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
-import org.koitharu.kotatsu.parsers.util.urlEncoded
-import java.text.DateFormat
+import org.koitharu.kotatsu.parsers.util.parseJson
 import java.text.SimpleDateFormat
-import java.util.Calendar
 import java.util.EnumSet
 import java.util.Locale
 
 @MangaSourceParser("KOMIKCAST", "KomikCast", "id")
 internal class Komikcast(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.KOMIKCAST, "komikcast.li", pageSize = 60, searchPageSize = 28) {
+    MangaReaderParser(context, MangaParserSource.KOMIKCAST, "v1.komikcast.fit", pageSize = 20, searchPageSize = 20) {
 
-	override val userAgentKey = ConfigKey.UserAgent(
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-	)
+    private val apiDomain = "be.komikcast.cc"
+    private val webDomain = "v1.komikcast.fit"
 
-	override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
-		.add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-		.add("Accept-Language", "en-US,en;q=0.5")
-		.add("Cache-Control", "no-cache")
-		.add("Pragma", "no-cache")
-		.build()
+    override val userAgentKey = ConfigKey.UserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    )
 
-	override fun intercept(chain: Interceptor.Chain): Response {
-		val request = chain.request()
-		val newRequest = when {
-			request.url.pathSegments.contains("chapter") -> {
-				// Add referer for chapter pages
-				val mangaSlug = request.url.toString()
-					.substringAfter("/chapter/")
-					.substringBefore("-chapter-")
-					.substringBefore("-ch-")
-				request.newBuilder()
-					.header("Referer", "https://$domain/komik/$mangaSlug/")
-					.build()
-			}
-			else -> {
-				request.newBuilder()
-					.header("Referer", "https://$domain/")
-					.build()
-			}
-		}
-		return chain.proceed(newRequest)
-	}
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        
+        // TODO: [BLOCKED] Endpoint `/chapters/{id}` saat ini mereturn 401 Unauthorized.
+        // Di sini nantinya Anda perlu menginjeksi header "Authorization: Bearer <...>"
+        // setelah Anda mereverse-engineering autentikasi tamu/guest API SPA mereka.
 
-	override val listUrl = "/daftar-komik"
-	override val datePattern = "MMM d, yyyy"
-	override val sourceLocale: Locale = Locale.ENGLISH
-	override val availableSortOrders: Set<SortOrder> =
-		EnumSet.of(SortOrder.UPDATED, SortOrder.POPULARITY, SortOrder.ALPHABETICAL, SortOrder.ALPHABETICAL_DESC)
+        val newRequest = request.newBuilder()
+            .header("Referer", "https://$webDomain/")
+            .header("Origin", "https://$webDomain")
+            .header("Accept", "application/json, text/plain, */*")
+            .build()
+            
+        return chain.proceed(newRequest)
+    }
 
-	override val filterCapabilities: MangaListFilterCapabilities
-		get() = super.filterCapabilities.copy(
-			isTagsExclusionSupported = false
-		)
+    override val sourceLocale: Locale = Locale.ENGLISH
+    override val availableSortOrders: Set<SortOrder> =
+        EnumSet.of(SortOrder.UPDATED, SortOrder.POPULARITY)
 
-	override suspend fun getFilterOptions() = super.getFilterOptions().copy(
-		availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED),
-		availableContentTypes = EnumSet.of(
-			ContentType.MANGA,
-			ContentType.MANHWA,
-			ContentType.MANHUA,
-		),
-	)
+    override val filterCapabilities: MangaListFilterCapabilities
+        get() = super.filterCapabilities.copy(
+            isTagsExclusionSupported = false
+        )
 
-	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val url = buildString {
-			append("https://")
-			append(domain)
+    override suspend fun getFilterOptions() = super.getFilterOptions().copy(
+        availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED),
+        availableContentTypes = EnumSet.of(
+            ContentType.MANGA,
+            ContentType.MANHWA,
+            ContentType.MANHUA,
+        ),
+    )
 
-			when {
+    override suspend fun getListPage(
+        page: Int,
+        order: SortOrder,
+        filter: MangaListFilter
+    ): List<Manga> {
+        val preset = when (order) {
+            SortOrder.POPULARITY -> "populer"
+            else -> "rilisan_terbaru"
+        }
 
-				!filter.query.isNullOrEmpty() -> {
-					append("/page/")
-					append(page.toString())
-					append("/?s=")
-					append(filter.query.urlEncoded())
-				}
+        // Endpoint JSON untuk list komik: GET https://be.komikcast.cc/series
+        val url = "https://$apiDomain/series?preset=$preset&take=${pageSize}&page=$page"
+        val json = webClient.httpGet(url).parseJson()
+        
+        return parseMangaListFromJson(json)
+    }
 
-				else -> {
-					append(listUrl)
-					append("/page/")
-					append(page.toString())
-					append("/?")
+    private fun parseMangaListFromJson(json: JSONObject): List<Manga> {
+        val dataArray = json.optJSONArray("data") ?: return emptyList()
+        val mangas = mutableListOf<Manga>()
 
-					filter.types.oneOrThrowIfMany()?.let { contentType ->
-						append("type=")
-						append(when (contentType) {
-							ContentType.MANGA -> "manga"
-							ContentType.MANHWA -> "manhwa"
-							ContentType.MANHUA -> "manhua"
-							else -> ""
-						})
-						append("&")
-					}
+        for (i in 0 until dataArray.length()) {
+            val item = dataArray.getJSONObject(i)
+            val dataObj = item.getJSONObject("data")
+            
+            val slug = dataObj.getString("slug")
+            val title = dataObj.getString("title")
+            val coverUrl = dataObj.optString("coverImage", "")
+            val rating = dataObj.optDouble("rating", RATING_UNKNOWN.toDouble()).toFloat()
 
-					append(
-						when (order) {
-							SortOrder.ALPHABETICAL -> "orderby=titleasc"
-							SortOrder.ALPHABETICAL_DESC -> "orderby=titledesc"
-							SortOrder.POPULARITY -> "orderby=popular"
-							else -> "sortby=update"
-						},
-					)
+            mangas.add(
+                Manga(
+                    id = generateUid(slug),
+                    url = slug, // Disimpan sebagai slug agar endpoint detail mudah dicari
+                    publicUrl = "https://$webDomain/komik/$slug",
+                    title = title,
+                    altTitles = emptySet(),
+                    rating = rating,
+                    contentRating = if (isNsfwSource) ContentRating.ADULT else null,
+                    coverUrl = coverUrl.takeIf { it.isNotEmpty() },
+                    tags = emptySet(),
+                    state = null,
+                    authors = emptySet(),
+                    source = source,
+                )
+            )
+        }
+        return mangas
+    }
 
-					val tagKey = "genre[]".urlEncoded()
-					val tagQuery =
-						if (filter.tags.isEmpty()) ""
-						else filter.tags.joinToString(separator = "&", prefix = "&") { "$tagKey=${it.key}" }
-					append(tagQuery)
+    override suspend fun getDetails(manga: Manga): Manga {
+        // Slug sudah disimpan pada manga.url di getListPage.
+        val slug = manga.url 
+        val url = "https://$apiDomain/series/$slug"
 
-					if (filter.states.isNotEmpty()) {
-						filter.states.oneOrThrowIfMany()?.let {
-							append("&status=")
-							append(
-								when (it) {
-									MangaState.ONGOING -> "Ongoing"
-									MangaState.FINISHED -> "Completed"
-									else -> ""
-								}
-							)
-						}
-					}
-				}
-			}
-		}
+        repeat(3) { attempt ->
+            if (attempt > 0) delay(1000)
 
-		return parseMangaList(webClient.httpGet(url).parseHtml())
-	}
+            val response = webClient.httpGet(url)
+            if (!response.isSuccessful) return@repeat
+            
+            val rootData = response.parseJson().getJSONObject("data")
+            val mangaId = rootData.getInt("id") // Manga ID dibutuhkan untuk list chapter
+            val dataObj = rootData.getJSONObject("data")
+            
+            val title = dataObj.getString("title")
+            val synopsis = dataObj.optString("synopsis", "")
+            val author = dataObj.optString("author", "")
+            val statusStr = dataObj.optString("status", "ongoing")
+            val state = if (statusStr.equals("ongoing", true)) MangaState.ONGOING else MangaState.FINISHED
+            
+            // Generate tags dari JSON array 'genres'
+            val genresArray = dataObj.optJSONArray("genres")
+            val tagsMap = getOrCreateTagMap()
+            val parsedTags = mutableSetOf<MangaTag>()
+            
+            if (genresArray != null) {
+                for (i in 0 until genresArray.length()) {
+                    val genreObj = genresArray.getJSONObject(i).getJSONObject("data")
+                    val genreName = genreObj.getString("name")
+                    tagsMap[genreName]?.let { parsedTags.add(it) }
+                }
+            }
 
-	override suspend fun getDetails(manga: Manga): Manga {
-		val mangaUrl = manga.url.toAbsoluteUrl(domain)
+            // Memanggil Chapter List secara berantai via ID
+            val chapters = getChapters(mangaId)
 
-		repeat(3) { attempt ->
-			if (attempt > 0) {
-				delay(1500)
-			}
+            return manga.copy(
+                title = title,
+                description = synopsis,
+                state = state,
+                authors = setOfNotNull(author.takeIf { it.isNotEmpty() }),
+                tags = parsedTags,
+                chapters = chapters
+            )
+        }
+        throw Exception("Gagal mengekstrak JSON Detail Manga setelah 3 percobaan: $slug")
+    }
 
-			val docs = webClient.httpGet(mangaUrl).parseHtml()
-			val chapterElements = docs.select("#chapter-wrapper > li")
-			val dateFormat = SimpleDateFormat(datePattern, sourceLocale)
+    private suspend fun getChapters(mangaId: Int): List<MangaChapter> {
+        val url = "https://$apiDomain/series/$mangaId/chapters"
+        val response = webClient.httpGet(url)
+        if (!response.isSuccessful) return emptyList()
 
-			val chapters = chapterElements.mapChapters(reversed = true) { index, element ->
-				val url = element.selectFirst("a.chapter-link-item")?.attrAsRelativeUrl("href")
-					?: return@mapChapters null
-				MangaChapter(
-					id = generateUid(url),
-					title = element.selectFirst("a.chapter-link-item")?.ownTextOrNull(),
-					url = url,
-					number = index + 1f,
-					volume = 0,
-					scanlator = null,
-					uploadDate = parseChapterDate(
-						dateFormat,
-						element.selectFirst("div.chapter-link-time")?.text(),
-					),
-					branch = null,
-					source = source,
-				)
-			}
+        val chaptersArray = response.parseJson().optJSONArray("data") ?: return emptyList()
+        val chapters = mutableListOf<MangaChapter>()
+        
+        for (i in 0 until chaptersArray.length()) {
+            val chapterItem = chaptersArray.getJSONObject(i)
+            val chapterId = chapterItem.getInt("id")
+            val chapterData = chapterItem.getJSONObject("data")
+            
+            val index = chapterData.optDouble("index", (chaptersArray.length() - i).toDouble()).toFloat()
+            val dateStr = chapterItem.optString("createdAt", "")
 
-			if (chapters.isNotEmpty()) {
-				return parseInfo(docs, manga, chapters)
-			}
-		}
+            chapters.add(
+                MangaChapter(
+                    id = generateUid(chapterId.toString()),
+                    title = "Chapter $index",
+                    url = chapterId.toString(), // Disimpan sebagai ID Chapter agar bisa dpanggil di `getPages()`
+                    number = index,
+                    volume = 0,
+                    scanlator = null,
+                    uploadDate = parseIsoDate(dateStr),
+                    branch = null,
+                    source = source,
+                )
+            )
+        }
+        return chapters
+    }
 
-		throw Exception("Failed to get manga details after 3 attempts for: $mangaUrl")
-	}
+    override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+        val chapterId = chapter.url
+        val url = "https://$apiDomain/chapters/$chapterId"
 
-	override suspend fun parseInfo(docs: Document, manga: Manga, chapters: List<MangaChapter>): Manga {
-		val tagMap = getOrCreateTagMap()
-		val tags = docs.select(".komik_info-content-genre > a").mapNotNullToSet { tagMap[it.text()] }
-		val state = docs.selectFirst(".komik_info-content-meta span:contains(Status)")?.html()
-		val mangaState = if (state?.contains("Ongoing") == true) {
-			MangaState.ONGOING
-		} else {
-			MangaState.FINISHED
-		}
-		val author = docs.selectFirst(".komik_info-content-meta span:contains(Author)")
-			?.lastElementChild()?.textOrNull()
-		val nsfw = docs.select("div")
-			.any { it.text().contains("Peringatan", ignoreCase = true) && it.text().contains("konten", ignoreCase = true) }
+        repeat(3) { attempt ->
+            if (attempt > 0) delay(1000)
 
-		val title = docs.selectFirst("h1.komik_info-content-body-title")?.text()!!
-			.replace(" Bahasa Indonesia", "").trim()
-		val description = docs.selectFirst("div.komik_info-description-sinopsis")?.text()
+            val response = webClient.httpGet(url)
+            
+            if (response.code == 401 || response.code == 403) {
+                // TODO: 401 UNAUTHORIZED CHECKPOINT
+                // Harus ditangani dengan login bearer / network interceptor dari SPA.
+                throw Exception("API membutuhkan Token/Header (Http ${response.code})")
+            }
 
-		return manga.copy(
-			title = title,
-			description = description,
-			state = mangaState,
-			authors = setOfNotNull(author),
-			contentRating = if (isNsfwSource || nsfw || manga.contentRating == ContentRating.ADULT) ContentRating.ADULT else ContentRating.SAFE,
-			tags = tags,
-			chapters = chapters,
-		)
-	}
+            if (!response.isSuccessful) return@repeat
+            
+            val json = response.parseJson().optJSONObject("data") ?: return@repeat
+            
+            // ASUMSI: Array JSON akan berada di properti "images" dengan array of strings
+            val imagesArray = json.optJSONArray("images") ?: org.json.JSONArray()
+            
+            val pages = mutableListOf<MangaPage>()
+            for (i in 0 until imagesArray.length()) {
+                val imageUrl = imagesArray.getString(i)
+                pages.add(
+                    MangaPage(
+                        id = generateUid(imageUrl),
+                        url = imageUrl,
+                        preview = null,
+                        source = source
+                    )
+                )
+            }
+            if (pages.isNotEmpty()) return pages
+        }
+        return emptyList()
+    }
 
-	override fun parseMangaList(docs: Document): List<Manga> {
-		return docs.select("div.list-update_item").mapNotNull {
-			val a = it.selectFirstOrThrow("a.data-tooltip")
-			val relativeUrl = a.attrAsRelativeUrl("href")
-			val rating = it.selectFirst(".numscore")?.text()?.toFloatOrNull()?.div(10) ?: RATING_UNKNOWN
-			val name = it.selectFirst("h3.title")?.text().orEmpty()
-			Manga(
-				id = generateUid(relativeUrl),
-				url = relativeUrl,
-				title = name,
-				altTitles = emptySet(),
-				publicUrl = a.attrAsAbsoluteUrl("href"),
-				rating = rating,
-				contentRating = if (isNsfwSource) ContentRating.ADULT else null,
-				coverUrl = it.selectFirst("img.ts-post-image")?.src(),
-				tags = emptySet(),
-				state = null,
-				authors = emptySet(),
-				source = source,
-			)
-		}
-	}
-
-
-	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
-
-		repeat(3) { attempt ->
-			if (attempt > 0) {
-				delay(500)
-			}
-
-			val docs = webClient.httpGet(chapterUrl).parseHtml()
-			val pages = extractPages(docs)
-
-			if (pages.isNotEmpty()) {
-				return pages
-			}
-		}
-		return emptyList()
-	}
-
-	private fun extractPages(docs: Document): List<MangaPage> {
-		val imageSelectors = listOf(
-			"div#chapter_body img",
-			"img[src*='.jpg'], img[src*='.png'], img[src*='.jpeg'], img[src*='.webp']",
-		)
-
-		for (selector in imageSelectors) {
-			val chapterImages = docs.select(selector)
-			if (chapterImages.isNotEmpty()) {
-				val pages = chapterImages.mapNotNull { img ->
-					val src = img.attr("src").takeIf { it.isNotEmpty() }
-						?: img.attr("data-src").takeIf { it.isNotEmpty() }
-						?: img.attr("data-lazy-src").takeIf { it.isNotEmpty() }
-						?: img.attr("data-original").takeIf { it.isNotEmpty() }
-						?: return@mapNotNull null
-
-					if (src.contains("loading") || src.contains("spinner") || src.contains("placeholder") || src.contains("logo")) {
-						return@mapNotNull null
-					}
-
-					MangaPage(
-						id = generateUid(src),
-						url = if (src.startsWith("http")) src else src.toAbsoluteUrl(domain),
-						preview = null,
-						source = source,
-					)
-				}
-				if (pages.isNotEmpty()) {
-					return pages
-				}
-			}
-		}
-		return emptyList()
-	}
-
-	private fun parseChapterDate(dateFormat: DateFormat, date: String?): Long {
-		date ?: return 0
-		return when {
-			date.endsWith(" ago", ignoreCase = true) -> {
-				parseRelativeDate(date)
-			}
-
-			else -> dateFormat.parseSafe(date)
-		}
-	}
-
-	private fun parseRelativeDate(date: String): Long {
-		val number = Regex("""(\d+)""").find(date)?.value?.toIntOrNull() ?: return 0
-		val cal = Calendar.getInstance()
-		return when {
-			WordSet(
-				"day",
-				"days",
-			).anyWordIn(date) -> cal.apply { add(Calendar.DAY_OF_MONTH, -number) }.timeInMillis
-
-			WordSet("hour", "hours").anyWordIn(date) -> cal.apply {
-				add(
-					Calendar.HOUR,
-					-number,
-				)
-			}.timeInMillis
-
-			WordSet(
-				"mins",
-			).anyWordIn(date) -> cal.apply {
-				add(
-					Calendar.MINUTE,
-					-number,
-				)
-			}.timeInMillis
-
-			WordSet("second").anyWordIn(date) -> cal.apply {
-				add(
-					Calendar.SECOND,
-					-number,
-				)
-			}.timeInMillis
-
-			WordSet("month", "months").anyWordIn(date) -> cal.apply { add(Calendar.MONTH, -number) }.timeInMillis
-			WordSet("year").anyWordIn(date) -> cal.apply { add(Calendar.YEAR, -number) }.timeInMillis
-			else -> 0
-		}
-	}
+    /** Helper custom untuk mengubah format tanggal ISO dari JSON */
+    private fun parseIsoDate(dateStr: String): Long {
+        if (dateStr.isEmpty()) return 0
+        return try {
+            // ISO Date: "2026-04-15T09:24:16.098+07:00" -> Kita pangkas formatnya menjadi T00:00:00 untuk parser standar
+            val cleanDate = dateStr.substringBefore("+").substringBeforeLast(".")
+            val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH)
+            format.parse(cleanDate)?.time ?: 0
+        } catch (e: Exception) {
+            0
+        }
+    }
 }
