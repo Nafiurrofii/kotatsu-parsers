@@ -11,7 +11,7 @@ import java.util.EnumSet
 
 @MangaSourceParser("KOMIKU", "Komiku", "id")
 internal class Komiku(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.KOMIKU, "komiku.org", pageSize = 20, searchPageSize = 10) {
+	MangaReaderParser(context, MangaParserSource.KOMIKU, "01.komiku.asia", pageSize = 20, searchPageSize = 10) {
 
 	private val apiDomain = "api.komiku.id"
 	override val datePattern = "dd/MM/yyyy"
