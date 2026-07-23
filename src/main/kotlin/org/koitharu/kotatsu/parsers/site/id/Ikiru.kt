@@ -34,12 +34,14 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.EnumSet
 import java.util.Locale
+import org.koitharu.kotatsu.parsers.util.parseJson
+import org.koitharu.kotatsu.parsers.util.json.mapJSON
 
 @MangaSourceParser("IKIRU", "Ikiru", "id")
 internal class Ikiru(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.IKIRU, 24, 24) {
 
-	override val configKeyDomain = ConfigKey.Domain("06.ikiru.wtf/")
+	override val configKeyDomain = ConfigKey.Domain("06.ikiru.wtf")
 	override val sourceLocale: Locale = Locale.ENGLISH
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
@@ -226,6 +228,12 @@ internal class Ikiru(context: MangaLoaderContext) :
 				?.let { it.attr("value").ifEmpty { it.attr("data-manga-id") } }
 			?: manga.url.substringAfterLast("/manga/").substringBefore("/")
 
+        val chapterId = Regex("""chapter_id=(\d+)""")
+            .find(doc.html())
+            ?.groupValues
+            ?.get(1)
+            ?: ""
+
 		val titleElement = doc.selectFirst("h1[itemprop=name]")
 		val title = titleElement?.text() ?: manga.title
 
@@ -270,7 +278,12 @@ internal class Ikiru(context: MangaLoaderContext) :
 			?.map { it.trim() }
 			?.toSet() ?: emptySet()
 
-		val chapters = loadChapters(mangaId, manga.url.toAbsoluteUrl(domain))
+//		val chapters = loadChapters(mangaId, manga.url.toAbsoluteUrl(domain))
+        val chapters = loadChapters(
+            mangaId = mangaId,
+            chapterId = chapterId,
+            mangaAbsoluteUrl = manga.url.toAbsoluteUrl(domain)
+        )
 
 		return manga.copy(
 			title = title,
@@ -284,53 +297,53 @@ internal class Ikiru(context: MangaLoaderContext) :
 		)
 	}
 
-	private suspend fun loadChapters(
-		mangaId: String,
-		mangaAbsoluteUrl: String,
-	): List<MangaChapter> {
-		val chapters = mutableListOf<MangaChapter>()
-		var page = 1
+    private suspend fun loadChapters(
+        mangaId: String,
+        chapterId: String,
+        mangaAbsoluteUrl: String,
+    ): List<MangaChapter> {
 
-		val headers = Headers.Companion.headersOf(
-			"hx-request", "true",
-			"Referer", mangaAbsoluteUrl,
-		)
+        val headers = Headers.headersOf(
+            "hx-request", "true",
+            "Referer", mangaAbsoluteUrl,
+        )
 
-		while (true) {
-			val url = "https://${domain}/ajax-call?manga_id=$mangaId&page=$page&action=chapter_list"
-			val doc = webClient.httpGet(url, headers).parseHtml()
+        val url =
+            "https://${domain}/wp-admin/admin-ajax.php?action=get_chapters" +
+                "&manga_id=$mangaId" +
+                "&chapter_id=$chapterId"
 
-			val chapterElements = doc.select("div#chapter-list > div[data-chapter-number]")
-			if (chapterElements.isEmpty()) break
+        val json = webClient.httpGet(url, headers).parseJson()
 
-			chapterElements.forEach { element ->
-				val a = element.selectFirst("a") ?: return@forEach
-				val href = a.attrAsRelativeUrl("href")
-				if (href.isBlank()) return@forEach
+        if (!json.getBoolean("success"))
+            return emptyList()
 
-				val chapterTitle = element.selectFirst("div.font-medium span")?.text()?.trim() ?: ""
-				val dateText = element.selectFirst("time")?.text()
-				val number = element.attr("data-chapter-number").toFloatOrNull() ?: -1f
+        val data = json.getJSONArray("data")
 
-				chapters.add(
-					MangaChapter(
-						id = generateUid(href),
-						title = chapterTitle,
-						url = href,
-						number = number,
-						volume = 0,
-						scanlator = null,
-						uploadDate = parseDate(dateText),
-						branch = null,
-						source = source,
-					),
-				)
-			}
-			page++
-			if (page > 100) break
-		}
-		return chapters.reversed()
-	}
+        return data.mapJSON { jo ->
+
+            val chapterUrl = jo.getString("url")
+
+            val number =
+                Regex("""chapter-(\d+(\.\d+)?)""")
+                    .find(chapterUrl)
+                    ?.groupValues?.get(1)
+                    ?.toFloatOrNull()
+                    ?: 0f
+
+            MangaChapter(
+                id = generateUid(chapterUrl),
+                title = jo.getString("title"),
+                url = chapterUrl.toRelativeUrl(domain),
+                number = number,
+                volume = 0,
+                scanlator = null,
+                uploadDate = 0L,
+                branch = null,
+                source = source,
+            )
+        }.reversed()
+    }
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
