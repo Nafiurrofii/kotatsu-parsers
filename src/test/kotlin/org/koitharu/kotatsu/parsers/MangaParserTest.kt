@@ -28,6 +28,14 @@ internal class MangaParserTest {
 	fun list(source: MangaParserSource) = runTest(timeout = timeout) {
 		val parser = context.newParserInstance(source)
 		val list = parser.getList(MangaSearchQuery.Builder().build())
+        // --- TAMBAHKAN BARIS INI UNTUK MENAMPILKAN LIST ---
+        list.forEachIndexed { index, manga ->
+            println("${index + 1}. Judul: ${manga.title}")
+            println("   URL: ${manga.url}")
+            println("   Cover: ${manga.coverUrl}")
+            println("-------------------------------------------------")
+        }
+        // --------------------------------------------------
 		checkMangaList(list, "list")
 		assert(list.all { it.source == source })
 	}
